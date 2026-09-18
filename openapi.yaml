@@ -1,0 +1,384 @@
+openapi: 3.1.0
+info:
+  title: Trading Price API
+  version: 1.0.0
+  description: |
+    Real-time price backend (tick, OHLC candles, technical indicators) sourced from TradingView WebSocket upstream.
+    Built with Go + chi v5. This spec is REST-only for RapidAPI Hub — WebSocket is documented separately in README/description.
+
+    **Auth:** `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+    **Rate limiting:** headers `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` (unix sec), `429` + `Retry-After` when exceeded.
+
+    **WebSocket (not in this spec):** `GET /ws?api_key=<key>` on `WS_PORT` (default `:8081`, or single `:PORT` on Cloud Run). See README and `internal/wsapi/handler.go:106` for `subscribe`/`unsubscribe` protocol. Exclude from RapidAPI listing unless your RapidAPI plan offers a separate "WebSocket API" type.
+  contact:
+    name: Trading Price API
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8080
+    description: Local dev (HTTP)
+  - url: http://localhost:8081
+    description: Local dev (WebSocket)
+  - url: https://api.example.com
+    description: Production (replace with actual deployment URL)
+
+tags:
+  - name: health
+    description: Health check
+  - name: quote
+    description: Latest price per symbol
+  - name: candle
+    description: OHLC history
+  - name: indicator
+    description: Technical indicators from TradingView Scanner
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Health check
+      description: Returns service status. No auth required. Defined in `internal/httpapi/handler_quote.go:9` `handleHealth`.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  symbols:
+                    type: integer
+                    description: Number of active symbols (currently hard-coded to 0 in handler)
+                    example: 0
+              example:
+                status: ok
+                symbols: 0
+
+  /v1/quote:
+    get:
+      tags: [quote]
+      summary: Get latest price for a symbol
+      description: Returns the latest `price` from the in-memory ring buffer (`Store.RecentTicks` 3600/symbol). Source is `candle.Store` via `cmd/server/main.go:150`.
+      operationId: getQuote
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          description: Internal symbol code, e.g. `FOREXCOM:XAUUSD`
+          schema:
+            type: string
+            example: FOREXCOM:XAUUSD
+      responses:
+        '200':
+          description: Price found
+          headers:
+            X-RateLimit-Limit:
+              schema: { type: integer }
+              description: Bucket capacity (per minute, by tier)
+            X-RateLimit-Remaining:
+              schema: { type: integer }
+            X-RateLimit-Reset:
+              schema: { type: integer, format: int64 }
+              description: Unix timestamp when quota resets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteResponse'
+              example:
+                symbol: FOREXCOM:XAUUSD
+                price: 2650.42
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Symbol has no tick data yet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error: symbol not found or no data yet
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/candle:
+    get:
+      tags: [candle]
+      summary: Get OHLC candle history
+      description: 'Returns the last `n` closed candles from `candle.Store`. Supported intervals defined in `internal/candle/builder.go:11`: `1m,5m,15m,30m,1h,4h,1d`.'
+      operationId: getCandle
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+            example: FOREXCOM:XAUUSD
+        - name: interval
+          in: query
+          required: true
+          description: Candle bucket
+          schema:
+            type: string
+            enum: [1m, 5m, 15m, 30m, 1h, 4h, 1d]
+            example: 1m
+        - name: limit
+          in: query
+          required: false
+          description: Number of candles (1-1000, default 100)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+            example: 100
+      responses:
+        '200':
+          description: List of candles (newest at end of array)
+          headers:
+            X-RateLimit-Limit: { schema: { type: integer } }
+            X-RateLimit-Remaining: { schema: { type: integer } }
+            X-RateLimit-Reset: { schema: { type: integer, format: int64 } }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandleResponse'
+              example:
+                symbol: FOREXCOM:XAUUSD
+                interval: 1m
+                candles:
+                  - symbol: FOREXCOM:XAUUSD
+                    interval: 1m
+                    open: 2649.1
+                    high: 2651.0
+                    low: 2648.5
+                    close: 2650.42
+                    volume: 0
+                    timestamp: 1713091200
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/indicator:
+    get:
+      tags: [indicator]
+      summary: Get technical indicators (Scanner)
+      description: |
+        Proxy to TradingView Scanner (`internal/scanner/client.go:129`). `asset_class` is looked up from the `symbols` table to select `/forex/scan`, `/crypto/scan`, or `/global/scan` (fallback). Cached with TTL 10s (`scanner.NewClient` in `cmd/server/main.go:141`).
+        30 fixed-order columns in `scanner/client.go:53` — `parseRow` maps by position.
+      operationId: getIndicator
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+            example: FOREXCOM:XAUUSD
+      responses:
+        '200':
+          description: Indicators found
+          headers:
+            X-RateLimit-Limit: { schema: { type: integer } }
+            X-RateLimit-Remaining: { schema: { type: integer } }
+            X-RateLimit-Reset: { schema: { type: integer, format: int64 } }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndicatorResponse'
+              example:
+                symbol: FOREXCOM:XAUUSD
+                indicators:
+                  name: FOREXCOM:XAUUSD
+                  description: Gold Spot / US Dollar
+                  close: 2650.42
+                  change: 0.85
+                  change_abs: 22.5
+                  Recommend.All: 0.6
+                  RSI: 62.3
+                  RSI[1]: 58.1
+                  Stoch.K: 78.4
+                  Stoch.D: 75.2
+                  Mom: 12.5
+                  MACD.macd: 1.2
+                  MACD.signal: 0.9
+                  EMA5: 2648.1
+                  EMA10: 2645.0
+                  high: 2655.0
+                  low: 2638.2
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Symbol not found in scanner
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error: symbol not found in scanner
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '502':
+          description: Upstream scanner unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error: scanner unavailable
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API-Key
+      description: "Send `Authorization: Bearer <plain_key>` — extracted in `internal/apikey/middleware.go:143` `extractKey`"
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: "Alternative header `X-API-Key: <plain_key>`"
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, example: invalid api key }
+
+    Tick:
+      type: object
+      description: "From `pkg/types/tick.go:4` + `tvsocket/client.go:214`"
+      properties:
+        symbol: { type: string, example: FOREXCOM:XAUUSD }
+        lp: { type: number, format: double, description: last price, example: 2650.42 }
+        ch: { type: number, format: double, description: change, example: 22.5 }
+        chp: { type: number, format: double, description: change percent, example: 0.85 }
+        high_price: { type: number, format: double, example: 2655.0 }
+        low_price: { type: number, format: double, example: 2638.2 }
+        ts: { type: integer, format: int64, description: unix seconds, example: 1713091200 }
+
+    Candle:
+      type: object
+      description: "From `pkg/types/candle.go:3` — OHLC aggregation via `candle.Builder`"
+      properties:
+        symbol: { type: string, example: FOREXCOM:XAUUSD }
+        interval: { type: string, enum: [1m, 5m, 15m, 30m, 1h, 4h, 1d], example: 1m }
+        open: { type: number, format: double, example: 2649.1 }
+        high: { type: number, format: double, example: 2651.0 }
+        low: { type: number, format: double, example: 2648.5 }
+        close: { type: number, format: double, example: 2650.42 }
+        volume: { type: number, format: double, example: 0 }
+        timestamp: { type: integer, format: int64, description: bucket start unix sec (UTC truncated), example: 1713091200 }
+
+    QuoteResponse:
+      type: object
+      properties:
+        symbol: { type: string, example: FOREXCOM:XAUUSD }
+        price: { type: number, format: double, example: 2650.42 }
+
+    CandleResponse:
+      type: object
+      properties:
+        symbol: { type: string, example: FOREXCOM:XAUUSD }
+        interval: { type: string, example: 1m }
+        candles:
+          type: array
+          items: { $ref: '#/components/schemas/Candle' }
+
+    Indicator:
+      type: object
+      description: "Result from `scanner/client.go:16` — 30 columns, all nullable pointers"
+      properties:
+        name: { type: string, nullable: true, example: FOREXCOM:XAUUSD }
+        description: { type: string, nullable: true, example: Gold Spot / US Dollar }
+        close: { type: number, format: double, nullable: true, example: 2650.42 }
+        change: { type: number, format: double, nullable: true, example: 0.85 }
+        change_abs: { type: number, format: double, nullable: true, example: 22.5 }
+        Recommend.All: { type: number, format: double, nullable: true, example: 0.6 }
+        RSI: { type: number, format: double, nullable: true, example: 62.3 }
+        RSI[1]: { type: number, format: double, nullable: true }
+        Stoch.K: { type: number, format: double, nullable: true }
+        Stoch.D: { type: number, format: double, nullable: true }
+        Mom: { type: number, format: double, nullable: true }
+        Mom[1]: { type: number, format: double, nullable: true }
+        MACD.macd: { type: number, format: double, nullable: true }
+        MACD.signal: { type: number, format: double, nullable: true }
+        EMA5: { type: number, format: double, nullable: true }
+        EMA10: { type: number, format: double, nullable: true }
+        EMA20: { type: number, format: double, nullable: true }
+        SMA20: { type: number, format: double, nullable: true }
+        SMA50: { type: number, format: double, nullable: true }
+        SMA200: { type: number, format: double, nullable: true }
+        BB.upper: { type: number, format: double, nullable: true }
+        BB.lower: { type: number, format: double, nullable: true }
+        ADX: { type: number, format: double, nullable: true }
+        ADX+DI: { type: number, format: double, nullable: true }
+        ADX-DI: { type: number, format: double, nullable: true }
+        AO: { type: number, format: double, nullable: true }
+        AO[1]: { type: number, format: double, nullable: true }
+        ATR: { type: number, format: double, nullable: true }
+        high: { type: number, format: double, nullable: true }
+        low: { type: number, format: double, nullable: true }
+
+    IndicatorResponse:
+      type: object
+      properties:
+        symbol: { type: string, example: FOREXCOM:XAUUSD }
+        indicators: { $ref: '#/components/schemas/Indicator' }
+
+
+
+
+
+  responses:
+    BadRequest:
+      description: Invalid parameters
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            missing-symbol:
+              value: { error: parameter symbol is required }
+            limit-range:
+              value: { error: limit must be between 1-1000 }
+    Unauthorized:
+      description: Missing/invalid API key
+      headers:
+        WWW-Authenticate: { schema: { type: string } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            missing:
+              value: { error: missing api key }
+            invalid:
+              value: { error: invalid api key }
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers:
+        X-RateLimit-Limit: { schema: { type: integer } }
+        X-RateLimit-Remaining: { schema: { type: integer } }
+        X-RateLimit-Reset: { schema: { type: integer, format: int64 } }
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error: rate limit exceeded
+
+  parameters:
+    SymbolQuery:
+      name: symbol
+      in: query
+      required: true
+      schema: { type: string, example: FOREXCOM:XAUUSD }

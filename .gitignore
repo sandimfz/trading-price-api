@@ -1,0 +1,61 @@
+# env & secrets — never commit real secrets
+.env
+*.env.local
+*.env.*.local
+!.env.example
+
+# build artifacts — Go binaries
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+c.out
+
+# Go workspace
+vendor/
+go.work.sum
+
+# air — live reload (see .air.toml)
+tmp/
+
+# logs
+*.log
+logs/
+
+# Redis dump (local dev only)
+dump.rdb
+
+# editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# test & benchmark
+*.prof
+*.pprof
+cpu.prof
+mem.prof
+
+# golangci-lint cache
+.golangci-lint-cache/
+
+# local tool caches
+.cache/

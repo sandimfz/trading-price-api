@@ -1,0 +1,9 @@
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - gosimple
+    - unused
+    - gosec
+    - bodyclose
