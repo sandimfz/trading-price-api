@@ -1,7 +1,6 @@
 # Trading Price API
 
-Backend service penyedia harga real-time (tick, candle OHLC, indikator teknikal) yang diambil dari upstream TradingView WebSocket, dibangun dengan Go. Sesuai panduan: `Backend Guidelines — Trading Price API (Go)` dan `Database Schema — Trading Price API`.
-
+Backend service penyedia harga real-time (tick, candle OHLC, indikator teknikal) yang diambil dari upstream WebSocket, dibangun dengan Go.
 ## Arsitektur
 
 ```
