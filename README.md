@@ -77,9 +77,3 @@ Plain key hanya tampil sekali; yang tersimpan di DB hanya SHA-256 hash.
 ```bash
 make test        # go test -race -cover ./...
 ```
-
-## Catatan
-
-- Docker/deploy (`deploy/`) sengaja belum dibuat.
-- Tabel `ticks` (raw tick history) opsional — ring buffer in-memory 3600 tick/simbol sudah cukup untuk dev.
-- Rate limiter saat ini in-memory (per instance); ganti implementasi Redis untuk scale horizontal.
